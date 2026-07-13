@@ -8,9 +8,12 @@ service cloud.firestore {
       match /backups/{backupId} {
         allow read, write: if true;
       }
+
+      match /matchHistory/{matchId} {
+        allow read, write: if true;
+      }
     }
   }
 }
 
-// 目前為方便測試的公開規則：知道房間代碼的人可讀寫。
-// 正式長期使用建議加入 Firebase Authentication 與管理員權限。
+// 測試規則：知道房間代碼的人皆可讀寫。正式使用應加入 Firebase Authentication。
