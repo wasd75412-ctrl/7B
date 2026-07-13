@@ -154,12 +154,72 @@ body:before{content:"";position:fixed;inset:0;pointer-events:none;opacity:.32;ba
   .person.card2 .racket-lines{grid-template-columns:1fr}
   .person.card2 .racket-line{white-space:normal;display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:2}
 }
+
+/* BCM 2.2.15 — 計分模式大字球員名稱 */
+.score-main{
+  grid-template-columns:minmax(0,1.42fr) minmax(132px,.58fr);
+  gap:10px;
+}
+.score-side.b .score-main{
+  grid-template-columns:minmax(132px,.58fr) minmax(0,1.42fr);
+}
+.court-names{gap:8px}
+.court-name{padding:8px 4px}
+.court-name+.court-name{padding-top:12px}
+.court-name .score-player{
+  width:100%;
+  gap:10px;
+  font-size:clamp(3.3rem,6.1vw,7.2rem);
+  line-height:.92;
+}
+.court-player-copy{flex:1;gap:7px;overflow:visible}
+.court-player-name{
+  display:block;
+  width:100%;
+  overflow:visible;
+  text-overflow:clip;
+  white-space:normal;
+  overflow-wrap:anywhere;
+  word-break:keep-all;
+  text-align:center;
+  letter-spacing:-.08em;
+  text-shadow:0 8px 24px rgba(0,0,0,.4);
+}
+.court-position{
+  align-self:center;
+  min-width:4.6em;
+  padding:8px 15px;
+  font-size:.34em;
+  letter-spacing:.1em;
+}
+.avatar.score-large{
+  width:clamp(62px,6.5vw,104px);
+  height:clamp(62px,6.5vw,104px);
+  flex-basis:clamp(62px,6.5vw,104px);
+}
+.score-number{font-size:clamp(7rem,16vw,15rem)}
+@media(max-width:980px){
+  .score-main{grid-template-columns:minmax(0,1.5fr) minmax(100px,.5fr)}
+  .score-side.b .score-main{grid-template-columns:minmax(100px,.5fr) minmax(0,1.5fr)}
+  .court-name .score-player{font-size:clamp(2.5rem,5.8vw,5rem)}
+  .avatar.score-large{width:clamp(52px,6vw,78px);height:clamp(52px,6vw,78px);flex-basis:clamp(52px,6vw,78px)}
+}
+@media(max-width:680px){
+  .score-main,.score-side.b .score-main{grid-template-columns:1fr;grid-template-rows:auto 1fr}
+  .court-name .score-player{font-size:clamp(2rem,8.8vw,4.1rem);gap:4px}
+  .court-player-name{line-height:.92;letter-spacing:-.07em}
+  .court-position{font-size:.43em;min-width:4.4em;padding:5px 9px}
+  .avatar.score-large{width:clamp(44px,12vw,64px);height:clamp(44px,12vw,64px);flex-basis:clamp(44px,12vw,64px)}
+  .score-number{font-size:clamp(6rem,28vw,10.5rem)}
+  .court-name.server{padding:8px 4px}
+}
+
 </style></head>
 <body>
 <div id="splash" class="splash"><div class="splash-inner"><img class="splash-logo" src="icons/icon-512.png" alt="7B 羽球社"><h1>7B 羽球社</h1><p>BADMINTON CLUB MANAGER</p></div></div>
 <div id="landing" class="shell landing">
   <section class="card landing-card">
-    <div class="landing-brand"><img src="icons/icon-512.png" alt="7B 羽球社"><h2>7B 羽球社</h2><div class="sub">Badminton Club Manager · BCM 2.2.14 Score Highlight</div></div>
+    <div class="landing-brand"><img src="icons/icon-512.png" alt="7B 羽球社"><h2>7B 羽球社</h2><div class="sub">Badminton Club Manager · BCM 2.2.15 Large Score Names</div></div>
     <p class="sub">建立球局後，把觀看網址或房間代碼分享給球友，即時同步球員與比分。</p>
     <button id="createRoom" class="btn primary wide">建立新球局（管理員）</button>
     <div class="divider">或加入現有球局</div>
@@ -514,7 +574,7 @@ async function submitPollVote(){
 function togglePoll(){state.schedulePoll.status=state.schedulePoll.status==='closed'?'open':'closed';renderPoll();saveSoon()}
 function clearPollVotes(){if(prompt('要清空所有人的投票，請輸入「清空」：')!=='清空')return;state.schedulePoll.votes={};state.schedulePoll.voterPlayers={};renderPoll();saveSoon()}
 function setError(msg=''){const b=$('cloudError');b.textContent=msg;b.classList.toggle('hidden',!msg)}function setLandingError(msg=''){const b=$('landingError');b.textContent=msg;b.classList.toggle('hidden',!msg)}function setSync(text,type=''){$('syncBadge').textContent=text;$('syncBadge').className='pill '+type}
-function formatError(e){const code=e?.code||'unknown';if(code==='permission-denied')return 'Firestore 權限被拒絕（permission-denied）。請到 Firebase → Firestore → 規則，發布 ZIP 內 FIRESTORE_RULES.txt 的內容。';if(code==='invalid-argument'&&String(e?.message||'').includes('Nested arrays'))return '資料格式錯誤：Firestore 不支援巢狀陣列。請部署 BCM 2.2.14 Score Highlight 最新版。';return `Firebase 連線失敗：${code}\n${e?.message||e}`}
+function formatError(e){const code=e?.code||'unknown';if(code==='permission-denied')return 'Firestore 權限被拒絕（permission-denied）。請到 Firebase → Firestore → 規則，發布 ZIP 內 FIRESTORE_RULES.txt 的內容。';if(code==='invalid-argument'&&String(e?.message||'').includes('Nested arrays'))return '資料格式錯誤：Firestore 不支援巢狀陣列。請部署 BCM 2.2.15 Large Score Names 最新版。';return `Firebase 連線失敗：${code}\n${e?.message||e}`}
 function hostKey(id){return `bcmHost_${id}`}
 function currentUrl(id=roomId){const u=new URL(location.href);u.search='';u.hash='';u.searchParams.set('room',id);return u.toString()}
 function hostUrl(id=roomId,token=hostToken){const u=new URL(currentUrl(id));u.hash=`host=${encodeURIComponent(token)}`;return u.toString()}
