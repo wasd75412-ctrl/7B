@@ -265,6 +265,20 @@ body:before{content:"";position:fixed;inset:0;pointer-events:none;opacity:.32;ba
   .court-name.server{padding:8px 4px}
 }
 
+
+/* BCM 2.2.17 — 計分模式球員姓名再放大 */
+.court-player-name{
+  font-size:clamp(4.4rem,10.5vw,12.5rem)!important;
+  line-height:.82!important;
+  letter-spacing:-.1em!important;
+  max-width:100%;
+}
+@media(max-width:980px){
+  .court-player-name{font-size:clamp(3.5rem,10vw,8rem)!important}
+}
+@media(max-width:680px){
+  .court-player-name{font-size:clamp(2.8rem,12vw,6.2rem)!important;line-height:.84!important}
+}
 </style></head>
 <body>
 <div id="splash" class="splash"><div class="splash-inner"><img class="splash-logo" src="icons/icon-512.png" alt="7B 羽球社"><h1>7B 羽球社</h1><p>BADMINTON CLUB MANAGER</p></div></div>
