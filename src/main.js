@@ -11,7 +11,11 @@ const randomCode=()=>{const chars='ABCDEFGHJKLMNPQRSTUVWXYZ23456789';let x='';cr
 const randomToken=()=>crypto.randomUUID?.()||([...crypto.getRandomValues(new Uint32Array(4))].map(n=>n.toString(36)).join(''));
 const shuffle=a=>{a=[...a];const r=new Uint32Array(Math.max(1,a.length));crypto.getRandomValues(r);for(let i=a.length-1;i>0;i--){const j=r[i]% (i+1);[a[i],a[j]]=[a[j],a[i]]}return a};
 const initialState=()=>({version:9.2,roster:[],attendance:[],court:[],waitingQueue:[],queueDraftChosen:[],priority:null,match:{active:false,players:[[],[]],scores:[0,0],rallies:[],serving:0,positions:[[0,1],[0,1]],winner:null},rules:{target:11,cap:15,deuce:true},history:[],nextCall:null,schedulePoll:{status:'open',options:[],votes:{},voterPlayers:{}},nextEvent:null,updatedAt:null});
-let state=initialState(), roomId='', roomRef=null, isHost=false, hostToken='', adminPinHash='', unsubscribe=null, applying=false, saveTimer=null, editId=null;const expandedPlayerNotes=new Set();let profileOriginal=null,profileDirty={name:false,voiceName:false,racket:false,racketTension:false,racketString:false,backupRacket:false,backupTension:false,backupString:false,note:false};let voiceEnabled=localStorage.getItem('bdV76Voice')!=='0';let dismissedResultKey='';const selfToken=localStorage.getItem('bdV73SelfToken')||randomToken();localStorage.setItem('bdV73SelfToken',selfToken);let selfHash='';
+let state=initialState(), roomId='', roomRef=null, isHost=false, hostToken='', adminPinHash='', unsubscribe=null, applying=false, saveTimer=null, editId=null;
+const ROOM_HISTORY_KEEP=40;
+let historyArchive=[];
+let historyArchiveLoaded=false;
+let historyArchiveLoading=null;const expandedPlayerNotes=new Set();let profileOriginal=null,profileDirty={name:false,voiceName:false,racket:false,racketTension:false,racketString:false,backupRacket:false,backupTension:false,backupString:false,note:false};let voiceEnabled=localStorage.getItem('bdV76Voice')!=='0';let dismissedResultKey='';const selfToken=localStorage.getItem('bdV73SelfToken')||randomToken();localStorage.setItem('bdV73SelfToken',selfToken);let selfHash='';
 
 async function sha256(text){const buf=await crypto.subtle.digest('SHA-256',new TextEncoder().encode(text));return [...new Uint8Array(buf)].map(b=>b.toString(16).padStart(2,'0')).join('')}
 function encodeState(src){
@@ -48,22 +52,85 @@ function encodeState(src){
       voterPlayers:src.schedulePoll?.voterPlayers&&typeof src.schedulePoll.voterPlayers==='object'?src.schedulePoll.voterPlayers:{}
     },
     nextEvent:src.nextEvent?{optionId:src.nextEvent.optionId||'',date:src.nextEvent.date||'',time:src.nextEvent.time||'',location:src.nextEvent.location||'',note:src.nextEvent.note||'',publishedAt:src.nextEvent.publishedAt||''}:null,
-    history:(Array.isArray(src.history)?src.history:[]).map(h=>({
-      matchId:h.matchId||randomToken(),
+    history:encodeHistoryRows(src.history, ROOM_HISTORY_KEEP)
+  }
+}
+
+function encodeHistoryRows(list, keep=ROOM_HISTORY_KEEP){
+  const rows=(Array.isArray(list)?list:[]).map(h=>({
+    matchId:h.matchId||randomToken(),
+    time:h.time||'',
+    teamA1:h.teams?.[0]?.[0]||'',
+    teamA2:h.teams?.[0]?.[1]||'',
+    teamB1:h.teams?.[1]?.[0]||'',
+    teamB2:h.teams?.[1]?.[1]||'',
+    scoreA:h.scores?.[0]??0,
+    scoreB:h.scores?.[1]??0,
+    winner:h.winner===0||h.winner===1?h.winner:null,
+    endedAt:h.endedAt||'',
+    dateKey:h.dateKey||'',
+    monthKey:h.monthKey||''
+  }));
+  return keep>0&&rows.length>keep?rows.slice(-keep):rows;
+}
+
+function normalizeHistoryEntry(h){
+  if(!h||typeof h!=='object')return null;
+  if(Array.isArray(h.teams)){
+    return {
+      matchId:h.matchId||'',
       time:h.time||'',
-      teamA1:h.teams?.[0]?.[0]||'',
-      teamA2:h.teams?.[0]?.[1]||'',
-      teamB1:h.teams?.[1]?.[0]||'',
-      teamB2:h.teams?.[1]?.[1]||'',
-      scoreA:h.scores?.[0]??0,
-      scoreB:h.scores?.[1]??0,
+      teams:[Array.isArray(h.teams[0])?h.teams[0].filter(Boolean):[], Array.isArray(h.teams[1])?h.teams[1].filter(Boolean):[]],
+      scores:[h.scores?.[0]??h.scoreA??0, h.scores?.[1]??h.scoreB??0],
       winner:h.winner===0||h.winner===1?h.winner:null,
       endedAt:h.endedAt||'',
       dateKey:h.dateKey||'',
       monthKey:h.monthKey||''
-    }))
+    };
   }
+  return {
+    matchId:h.matchId||'',
+    time:h.time||'',
+    teams:[[h.teamA1||'',h.teamA2||''].filter(Boolean),[h.teamB1||'',h.teamB2||''].filter(Boolean)],
+    scores:[h.scoreA??0,h.scoreB??0],
+    winner:h.winner===0||h.winner===1?h.winner:null,
+    endedAt:h.endedAt||'',
+    dateKey:h.dateKey||'',
+    monthKey:h.monthKey||''
+  };
 }
+
+function historySortKey(h){
+  if(h?.endedAt){const t=Date.parse(h.endedAt);if(!Number.isNaN(t))return t}
+  const dk=historyDate(h);if(dk){const t=Date.parse(dk+'T00:00:00');if(!Number.isNaN(t))return t}
+  return 0;
+}
+
+function historyForStats(){
+  const map=new Map();
+  let anon=0;
+  const put=h=>{
+    const n=normalizeHistoryEntry(h);if(!n)return;
+    const key=n.matchId||`anon_${anon++}_${n.endedAt||n.time||''}_${n.scores?.[0]}-${n.scores?.[1]}`;
+    if(!n.matchId)n.matchId=key;
+    map.set(key,n);
+  };
+  for(const h of historyArchive)put(h);
+  for(const h of state.history||[])put(h);
+  return [...map.values()].sort((a,b)=>historySortKey(a)-historySortKey(b));
+}
+
+function recentRoomHistory(list=historyForStats()){
+  const rows=Array.isArray(list)?list:[];
+  return rows.length>ROOM_HISTORY_KEEP?rows.slice(-ROOM_HISTORY_KEEP):rows.slice();
+}
+
+function trimRoomHistoryLocal(){
+  state.history=recentRoomHistory(historyForStats());
+}
+
+function matchHistoryCollectionRef(){return collection(db,'badmintonRooms',roomId,'matchHistory')}
+
 
 const DEFAULT_VOICE_NAMES={'緁':'潔','Yoyo':'優又','建昱':'見育','郁荏':'玉刃'};
 function defaultVoiceName(name){return DEFAULT_VOICE_NAMES[String(name||'')]||''}
@@ -111,11 +178,11 @@ function decodeState(d){
 }
 
 
-function player(id){return state.roster.find(p=>p.id===id)}function pname(id){return player(id)?.name||'未知球員'}function vname(id){const p=player(id);return p?.voiceName?.trim()||defaultVoiceName(p?.name)||p?.name||'未知球員'}function initials(n){return [...String(n||'?')].slice(0,2).join('').toUpperCase()}function avatar(id,size=''){const p=player(id);return `<span class="avatar ${size}">${p?.avatar?`<img src="${p.avatar}" alt="">`:esc(initials(p?.name))}</span>`}function playerStats(id){let games=0,wins=0;for(const h of state.history){const teams=h.teams||[];for(let t=0;t<2;t++){if((teams[t]||[]).includes(id)){games++;if(h.winner===t)wins++}}}return{games,wins,losses:games-wins,rate:games?Math.round(wins/games*100):0}}
+function player(id){return state.roster.find(p=>p.id===id)}function pname(id){return player(id)?.name||'未知球員'}function vname(id){const p=player(id);return p?.voiceName?.trim()||defaultVoiceName(p?.name)||p?.name||'未知球員'}function initials(n){return [...String(n||'?')].slice(0,2).join('').toUpperCase()}function avatar(id,size=''){const p=player(id);return `<span class="avatar ${size}">${p?.avatar?`<img src="${p.avatar}" alt="">`:esc(initials(p?.name))}</span>`}function playerStats(id){let games=0,wins=0;for(const h of historyForStats()){const teams=h.teams||[];for(let t=0;t<2;t++){if((teams[t]||[]).includes(id)){games++;if(h.winner===t)wins++}}}return{games,wins,losses:games-wins,rate:games?Math.round(wins/games*100):0}}
 function localDateKey(d=new Date()){return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`}function localMonthKey(d=new Date()){return localDateKey(d).slice(0,7)}
 function historyDate(h){if(/^\d{4}-\d{2}-\d{2}$/.test(h.dateKey||''))return h.dateKey;if(h.endedAt){const d=new Date(h.endedAt);if(!isNaN(d.getTime()))return localDateKey(d)}const text=String(h.time||'');const m=text.match(/(\d{4})[\/.-](\d{1,2})[\/.-](\d{1,2})/);if(m)return `${m[1]}-${String(m[2]).padStart(2,'0')}-${String(m[3]).padStart(2,'0')}`;const d=new Date(text);return isNaN(d.getTime())?'':localDateKey(d)}
-function scopedStats(id,scope='career',month=localMonthKey()){let games=0,wins=0;const list=[];for(const h of state.history){const dk=historyDate(h);if(scope==='today'&&dk!==localDateKey())continue;if(scope==='month'&&!dk.startsWith(month))continue;for(let t=0;t<2;t++){if((h.teams?.[t]||[]).includes(id)){games++;if(h.winner===t)wins++;list.push({h,won:h.winner===t})}}}let streak=0,kind='';for(const x of list.slice().reverse()){const k=x.won?'W':'L';if(!kind)kind=k;if(k!==kind)break;streak++}return{games,wins,losses:games-wins,rate:games?Math.round(wins/games*100):0,streak,kind,list}}
-function relationshipStats(id){const partners=new Map(),opponents=new Map();for(const h of state.history){const teams=h.teams||[];let team=-1;for(let t=0;t<2;t++)if((teams[t]||[]).includes(id)){team=t;break}if(team<0)continue;for(const pid of teams[team]||[]){if(pid===id)continue;const x=partners.get(pid)||{id:pid,games:0,wins:0};x.games++;if(h.winner===team)x.wins++;partners.set(pid,x)}for(const oid of teams[1-team]||[]){const x=opponents.get(oid)||{id:oid,games:0,wins:0};x.games++;if(h.winner===team)x.wins++;opponents.set(oid,x)}}const finish=m=>[...m.values()].map(x=>({...x,rate:x.games?Math.round(x.wins/x.games*100):0}));return{partners:finish(partners).sort((a,b)=>b.rate-a.rate||b.games-a.games||pname(a.id).localeCompare(pname(b.id))),opponents:finish(opponents).sort((a,b)=>b.games-a.games||b.rate-a.rate)}}
+function scopedStats(id,scope='career',month=localMonthKey()){let games=0,wins=0;const list=[];for(const h of historyForStats()){const dk=historyDate(h);if(scope==='today'&&dk!==localDateKey())continue;if(scope==='month'&&!dk.startsWith(month))continue;for(let t=0;t<2;t++){if((h.teams?.[t]||[]).includes(id)){games++;if(h.winner===t)wins++;list.push({h,won:h.winner===t})}}}let streak=0,kind='';for(const x of list.slice().reverse()){const k=x.won?'W':'L';if(!kind)kind=k;if(k!==kind)break;streak++}return{games,wins,losses:games-wins,rate:games?Math.round(wins/games*100):0,streak,kind,list}}
+function relationshipStats(id){const partners=new Map(),opponents=new Map();for(const h of historyForStats()){const teams=h.teams||[];let team=-1;for(let t=0;t<2;t++)if((teams[t]||[]).includes(id)){team=t;break}if(team<0)continue;for(const pid of teams[team]||[]){if(pid===id)continue;const x=partners.get(pid)||{id:pid,games:0,wins:0};x.games++;if(h.winner===team)x.wins++;partners.set(pid,x)}for(const oid of teams[1-team]||[]){const x=opponents.get(oid)||{id:oid,games:0,wins:0};x.games++;if(h.winner===team)x.wins++;opponents.set(oid,x)}}const finish=m=>[...m.values()].map(x=>({...x,rate:x.games?Math.round(x.wins/x.games*100):0}));return{partners:finish(partners).sort((a,b)=>b.rate-a.rate||b.games-a.games||pname(a.id).localeCompare(pname(b.id))),opponents:finish(opponents).sort((a,b)=>b.games-a.games||b.rate-a.rate)}}
 function playerStatus(id){const td=scopedStats(id,'today');if(!td.games)return{label:'🌱 今日尚未出賽',kind:'idle'};if(td.kind==='W'&&td.streak>=3)return{label:`🔥 火燙 · ${td.streak} 連勝`,kind:'hot'};if(td.kind==='L'&&td.streak>=3)return{label:`🧊 調整中 · ${td.streak} 連敗`,kind:'cold'};if(td.wins===td.games)return{label:`✨ 今日全勝 · ${td.wins} 勝`,kind:'hot'};return{label:`🏸 今日 ${td.wins} 勝 ${td.losses} 敗`,kind:'normal'}}
 function careerBadges(id){const c=scopedStats(id,'career'),td=scopedStats(id,'today');const defs=[['🏸','初登場',c.games>=1],['🥉','10 場',c.games>=10],['🥈','50 場',c.games>=50],['🥇','100 場',c.games>=100],['🏆','10 勝',c.wins>=10],['💯','50 勝',c.wins>=50],['👑','100 勝',c.wins>=100],['🔥','3 連勝',td.kind==='W'&&td.streak>=3],['⚡','5 連勝',td.kind==='W'&&td.streak>=5],['🌟','10 連勝',td.kind==='W'&&td.streak>=10]];return defs}
 function relationRows(list,emptyText){if(!list.length)return `<div class="sub">${emptyText}</div>`;return list.slice(0,3).map((x,i)=>`<div class="duo-row"><span class="duo-rank">${i+1}</span><span>${avatar(x.id,'tiny')} <strong>${esc(pname(x.id))}</strong><div class="duo-meta">共同 ${x.games} 場 · ${x.wins} 勝</div></span><strong>${x.rate}%</strong></div>`).join('')}
@@ -136,8 +203,8 @@ function updateVoiceButton(){const b=$('voiceToggle');if(!b)return;b.textContent
 function formatEventDate(date,time){if(!date)return'';const d=new Date(`${date}T${time||'00:00'}`);if(isNaN(d.getTime()))return `${date}${time?' '+time:''}`;const dateText=d.toLocaleDateString('zh-TW',{month:'long',day:'numeric',weekday:'short'});return `${dateText}${time?` ${time}`:''}`}
 function renderNextEventAnnouncement(){const box=$('nextEventAnnouncement'),e=state.nextEvent;if(!box)return;box.classList.toggle('hidden',!e?.date);if(!e?.date){box.innerHTML='';return}box.innerHTML=`<h3>📣 下一次打球</h3><div class="next-event-main">${esc(formatEventDate(e.date,e.time))}</div><div class="next-event-place">📍 ${esc(e.location||'場地待公告')}</div>${e.note?`<div class="next-event-note">${esc(e.note)}</div>`:''}`}
 function calloutText(sourceIds){const ids=sourceIds||state.nextCall?.players||[];if(ids.length!==4||new Set(ids).size!==4)return'';return `下一場是 A隊 ${vname(ids[0])}和${vname(ids[1])}，對戰 B隊 ${vname(ids[2])}和${vname(ids[3])}。`}
-function renderDashboard(){if(!$('dashScore'))return;renderNextEventAnnouncement();$('dashboardDate').textContent=new Date().toLocaleDateString('zh-TW',{year:'numeric',month:'long',day:'numeric',weekday:'short'});const m=state.match,teams=m.players||[[],[]];$('dashScore').innerHTML=`<div class="dash-team"><div>A隊</div><div class="dash-num">${m.scores?.[0]||0}</div><div class="dash-players">${(teams[0]||[]).map(pname).join('／')||'尚未安排'}</div></div><div class="dash-vs">VS</div><div class="dash-team"><div>B隊</div><div class="dash-num">${m.scores?.[1]||0}</div><div class="dash-players">${(teams[1]||[]).map(pname).join('／')||'尚未安排'}</div></div>`;const played=state.history.filter(h=>historyDate(h)===localDateKey()).length,active=state.attendance.length,waiting=state.attendance.filter(id=>!state.court.includes(id)).length;$('dashMetrics').innerHTML=`<div class="metric"><strong>${played}</strong><span class="sub">今日場次</span></div><div class="metric"><strong>${active}</strong><span class="sub">今日出席</span></div><div class="metric"><strong>${waiting}</strong><span class="sub">候場人數</span></div><div class="metric"><strong>${state.rules.target}</strong><span class="sub">勝利分</span></div>`;const eligibleWait=state.attendance.filter(id=>!state.court.includes(id)),waitIds=uniqueIds(state.waitingQueue).filter(id=>eligibleWait.includes(id));for(const id of eligibleWait)if(!waitIds.includes(id))waitIds.push(id);$('dashWaiting').innerHTML=waitIds.map((id,i)=>`<div class="dash-row"><span>${avatar(id,'tiny')} ${esc(pname(id))}</span><strong>${esc(queueLabel(i,waitIds.length))}</strong></div>`).join('')||'<p class="sub">目前沒有候場球員。</p>';const nc=state.nextCall?.players||[];$('nextCall').classList.toggle('hidden',nc.length!==4);if(nc.length===4)$('nextCall').innerHTML=`<h3>🔔 下一場叫號</h3><div><strong>A隊：</strong>${esc(pname(nc[0]))}、${esc(pname(nc[1]))}</div><div><strong>B隊：</strong>${esc(pname(nc[2]))}、${esc(pname(nc[3]))}</div>`;const {hot,cold}=todayLeaders();$('hotCold').innerHTML=`<div class="leader-card hot"><strong>🔥 今日熱手</strong><div>${hot?`${avatar(hot.p.id,'tiny')} ${esc(hot.p.name)} · ${hot.s.streak} 連勝`:'尚無連勝資料'}</div></div><div class="leader-card cold"><strong>🧊 今日冰手</strong><div>${cold?`${avatar(cold.p.id,'tiny')} ${esc(cold.p.name)} · ${cold.s.streak} 連敗`:'尚無連敗資料'}</div></div>`}
-function renderStats(){const month=$('monthPick').value||localMonthKey();$('monthPick').value=month;const todayGames=state.history.filter(h=>historyDate(h)===localDateKey()).length,monthGames=state.history.filter(h=>historyDate(h).startsWith(month)).length;$('statsSummary').innerHTML=`<div class="metric"><strong>${todayGames}</strong><span class="sub">今日場次</span></div><div class="metric"><strong>${monthGames}</strong><span class="sub">選定月份場次</span></div><div class="metric"><strong>${state.history.length}</strong><span class="sub">生涯總場次</span></div><div class="metric"><strong>${state.roster.length}</strong><span class="sub">球員人數</span></div>`;const {hot,cold}=todayLeaders();$('hotColdStats').innerHTML=`<div class="leader-card hot"><strong>🔥 今日熱手</strong><div>${hot?`${esc(hot.p.name)} · ${hot.s.streak} 連勝 · 今日 ${hot.s.wins} 勝`:'尚無資料'}</div></div><div class="leader-card cold"><strong>🧊 今日冰手</strong><div>${cold?`${esc(cold.p.name)} · ${cold.s.streak} 連敗 · 今日 ${cold.s.losses} 敗`:'尚無資料'}</div></div>`;$('statsBody').innerHTML=state.roster.map(p=>{const t=scopedStats(p.id,'today'),mo=scopedStats(p.id,'month',month),c=scopedStats(p.id,'career'),st=t.streak?(t.kind==='W'?`🔥 ${t.streak}連勝`:`🧊 ${t.streak}連敗`):'—';return `<tr data-profile="${p.id}" style="cursor:pointer"><td>${avatar(p.id,'tiny')} <strong>${esc(p.name)}</strong></td><td>${t.wins}勝 ${t.losses}敗 (${t.rate}%)</td><td>${mo.wins}勝 ${mo.losses}敗 (${mo.rate}%)</td><td>${c.wins}勝 ${c.losses}敗 (${c.rate}%)</td><td>${st}</td></tr>`}).join('');all('[data-profile]').forEach(x=>x.onclick=()=>openEdit(x.dataset.profile))}
+function renderDashboard(){if(!$('dashScore'))return;renderNextEventAnnouncement();$('dashboardDate').textContent=new Date().toLocaleDateString('zh-TW',{year:'numeric',month:'long',day:'numeric',weekday:'short'});const m=state.match,teams=m.players||[[],[]];$('dashScore').innerHTML=`<div class="dash-team"><div>A隊</div><div class="dash-num">${m.scores?.[0]||0}</div><div class="dash-players">${(teams[0]||[]).map(pname).join('／')||'尚未安排'}</div></div><div class="dash-vs">VS</div><div class="dash-team"><div>B隊</div><div class="dash-num">${m.scores?.[1]||0}</div><div class="dash-players">${(teams[1]||[]).map(pname).join('／')||'尚未安排'}</div></div>`;const played=historyForStats().filter(h=>historyDate(h)===localDateKey()).length,active=state.attendance.length,waiting=state.attendance.filter(id=>!state.court.includes(id)).length;$('dashMetrics').innerHTML=`<div class="metric"><strong>${played}</strong><span class="sub">今日場次</span></div><div class="metric"><strong>${active}</strong><span class="sub">今日出席</span></div><div class="metric"><strong>${waiting}</strong><span class="sub">候場人數</span></div><div class="metric"><strong>${state.rules.target}</strong><span class="sub">勝利分</span></div>`;const eligibleWait=state.attendance.filter(id=>!state.court.includes(id)),waitIds=uniqueIds(state.waitingQueue).filter(id=>eligibleWait.includes(id));for(const id of eligibleWait)if(!waitIds.includes(id))waitIds.push(id);$('dashWaiting').innerHTML=waitIds.map((id,i)=>`<div class="dash-row"><span>${avatar(id,'tiny')} ${esc(pname(id))}</span><strong>${esc(queueLabel(i,waitIds.length))}</strong></div>`).join('')||'<p class="sub">目前沒有候場球員。</p>';const nc=state.nextCall?.players||[];$('nextCall').classList.toggle('hidden',nc.length!==4);if(nc.length===4)$('nextCall').innerHTML=`<h3>🔔 下一場叫號</h3><div><strong>A隊：</strong>${esc(pname(nc[0]))}、${esc(pname(nc[1]))}</div><div><strong>B隊：</strong>${esc(pname(nc[2]))}、${esc(pname(nc[3]))}</div>`;const {hot,cold}=todayLeaders();$('hotCold').innerHTML=`<div class="leader-card hot"><strong>🔥 今日熱手</strong><div>${hot?`${avatar(hot.p.id,'tiny')} ${esc(hot.p.name)} · ${hot.s.streak} 連勝`:'尚無連勝資料'}</div></div><div class="leader-card cold"><strong>🧊 今日冰手</strong><div>${cold?`${avatar(cold.p.id,'tiny')} ${esc(cold.p.name)} · ${cold.s.streak} 連敗`:'尚無連敗資料'}</div></div>`}
+function renderStats(){const month=$('monthPick').value||localMonthKey();$('monthPick').value=month;const allHistory=historyForStats(),todayGames=allHistory.filter(h=>historyDate(h)===localDateKey()).length,monthGames=allHistory.filter(h=>historyDate(h).startsWith(month)).length;$('statsSummary').innerHTML=`<div class="metric"><strong>${todayGames}</strong><span class="sub">今日場次</span></div><div class="metric"><strong>${monthGames}</strong><span class="sub">選定月份場次</span></div><div class="metric"><strong>${allHistory.length}</strong><span class="sub">生涯總場次</span></div><div class="metric"><strong>${state.roster.length}</strong><span class="sub">球員人數</span></div>`;const {hot,cold}=todayLeaders();$('hotColdStats').innerHTML=`<div class="leader-card hot"><strong>🔥 今日熱手</strong><div>${hot?`${esc(hot.p.name)} · ${hot.s.streak} 連勝 · 今日 ${hot.s.wins} 勝`:'尚無資料'}</div></div><div class="leader-card cold"><strong>🧊 今日冰手</strong><div>${cold?`${esc(cold.p.name)} · ${cold.s.streak} 連敗 · 今日 ${cold.s.losses} 敗`:'尚無資料'}</div></div>`;$('statsBody').innerHTML=state.roster.map(p=>{const t=scopedStats(p.id,'today'),mo=scopedStats(p.id,'month',month),c=scopedStats(p.id,'career'),st=t.streak?(t.kind==='W'?`🔥 ${t.streak}連勝`:`🧊 ${t.streak}連敗`):'—';return `<tr data-profile="${p.id}" style="cursor:pointer"><td>${avatar(p.id,'tiny')} <strong>${esc(p.name)}</strong></td><td>${t.wins}勝 ${t.losses}敗 (${t.rate}%)</td><td>${mo.wins}勝 ${mo.losses}敗 (${mo.rate}%)</td><td>${c.wins}勝 ${c.losses}敗 (${c.rate}%)</td><td>${st}</td></tr>`}).join('');all('[data-profile]').forEach(x=>x.onclick=()=>openEdit(x.dataset.profile))}
 
 
 const POLL_UNAVAILABLE='__unavailable__';
@@ -234,7 +301,7 @@ function renderRoomLibrary(){const rows=roomLibrary().sort((a,b)=>Number(b.favor
 function updateCurrentRoomControls(){if(!roomId)return;const r=roomRecord(roomId)||{id:roomId};$('favoriteRoomBtn').textContent=r.favorite?'★ 已加入常用':'☆ 加入常用';$('roomLocalName').textContent=r.name?` · ${r.name}`:''}
 async function createRoom(){setLandingError('');let pin=prompt('請設定 4～8 位管理員 PIN。之後可在 iPad 或其他裝置輸入 PIN 進入管理員模式：','2580');if(pin===null)return;pin=pin.trim();if(!/^\d{4,8}$/.test(pin))return setLandingError('管理員 PIN 請輸入 4～8 位數字。');const id=randomCode(),token=randomToken(),ref=doc(db,'badmintonRooms',id);const pinHash=await sha256(pin);const data={...encodeState(initialState()),hostToken:token,adminPinHash:pinHash,createdAt:serverTimestamp(),updatedAt:serverTimestamp()};try{await setDoc(ref,data);localStorage.setItem(hostKey(id),token);location.href=hostUrl(id,token)}catch(e){setLandingError(formatError(e))}}
 async function enterRoom(id){id=id.trim().toUpperCase().replace(/[^A-Z0-9]/g,'').slice(0,6);if(id.length!==6)return setLandingError('請輸入正確的 6 位房間代碼。');location.href=currentUrl(id)}
-async function connectRoom(id){roomId=id;roomRef=doc(db,'badmintonRooms',id);selfHash=await sha256(selfToken);setSync('連線中');try{const snap=await getDoc(roomRef);if(!snap.exists())throw Object.assign(new Error('找不到此房間'),{code:'not-found'});const data=snap.data();adminPinHash=data.adminPinHash||'';hostToken=parseHostHash()||localStorage.getItem(hostKey(id))||'';isHost=!!hostToken&&hostToken===data.hostToken;if(isHost)localStorage.setItem(hostKey(id),hostToken);rememberRoom(id,isHost);applyState(data);$('landing').classList.add('hidden');$('app').classList.remove('hidden');$('roomCode').textContent=id;$('scoreRoom').textContent=id;updateCurrentRoomControls();$('roleBadge').textContent=isHost?'管理員':'觀看者';$('roleBadge').className='pill '+(isHost?'host':'');$('viewerNote').classList.toggle('hidden',isHost);applyRole();unsubscribe=onSnapshot(roomRef,s=>{if(!s.exists())return;applyState(s.data());setSync('已同步','online');setError('')},e=>{setSync('同步中斷','error');setError(formatError(e))});setSync('已同步','online');bindSyncModeUI();if(isHost){setTimeout(ensureGenesisAndDaily,900);setTimeout(()=>flushPendingHistory().catch(e=>console.warn(e)),1200)}}catch(e){setLandingError(formatError(e));history.replaceState(null,'',location.pathname);}}
+async function connectRoom(id){roomId=id;roomRef=doc(db,'badmintonRooms',id);selfHash=await sha256(selfToken);setSync('連線中');try{const snap=await getDoc(roomRef);if(!snap.exists())throw Object.assign(new Error('找不到此房間'),{code:'not-found'});const data=snap.data();adminPinHash=data.adminPinHash||'';hostToken=parseHostHash()||localStorage.getItem(hostKey(id))||'';isHost=!!hostToken&&hostToken===data.hostToken;if(isHost)localStorage.setItem(hostKey(id),hostToken);rememberRoom(id,isHost);applyState(data);$('landing').classList.add('hidden');$('app').classList.remove('hidden');$('roomCode').textContent=id;$('scoreRoom').textContent=id;updateCurrentRoomControls();$('roleBadge').textContent=isHost?'管理員':'觀看者';$('roleBadge').className='pill '+(isHost?'host':'');$('viewerNote').classList.toggle('hidden',isHost);applyRole();unsubscribe=onSnapshot(roomRef,s=>{if(!s.exists())return;applyState(s.data());setSync('已同步','online');setError('')},e=>{setSync('同步中斷','error');setError(formatError(e))});setSync('已同步','online');bindSyncModeUI();loadHistoryArchive().then(()=>{renderAll();if(isHost)return migrateOverflowHistoryIfNeeded()}).catch(e=>console.warn(e));if(isHost){setTimeout(ensureGenesisAndDaily,900);setTimeout(()=>flushPendingHistory().catch(e=>console.warn(e)),1200)}}catch(e){setLandingError(formatError(e));history.replaceState(null,'',location.pathname);}}
 function applyRole(){all('.host-only').forEach(el=>el.classList.toggle('hidden',!isHost));if(!isHost){$('resultModal').classList.add('hidden');$('scoreView').classList.add('hidden');}$('adminLoginBtn').classList.toggle('hidden',isHost);$('scoreRole').textContent=isHost?'管理員':'觀看模式';$('scoreA').classList.toggle('clickable',isHost);$('scoreB').classList.toggle('clickable',isHost);all('input,select,textarea').forEach(el=>{if(['editName','editVoiceName','editRacket','editRacketTension','editRacketString','editBackupRacket','editBackupTension','editBackupString','editNote','editPhoto','joinCode','playerSearch','playerSort'].includes(el.id)||el.classList.contains('viewer-enabled'))return;if(!isHost)el.disabled=true;else el.disabled=false})}
 function cleanState(d){return decodeState(d)}
 function applyState(data){applying=true;state=cleanState(data);renderAll();applying=false}
@@ -302,19 +369,83 @@ function queuePendingHistory(entry){
   writePendingHistory(rows.slice(-30));
 }
 function matchHistoryDocRef(matchId){return doc(db,'badmintonRooms',roomId,'matchHistory',matchId)}
+async function loadHistoryArchive({force=false}={}){
+  if(!roomId)return [];
+  if(historyArchiveLoaded&&!force)return historyArchive;
+  if(historyArchiveLoading)return historyArchiveLoading;
+  historyArchiveLoading=(async()=>{
+    try{
+      const all=await getDocs(matchHistoryCollectionRef());
+      historyArchive=all.docs.map(d=>normalizeHistoryEntry({...d.data(),matchId:d.data().matchId||d.id})).filter(Boolean)
+        .sort((a,b)=>historySortKey(a)-historySortKey(b));
+      historyArchiveLoaded=true;
+      return historyArchive;
+    }catch(e){
+      console.warn('loadHistoryArchive failed',e);
+      historyArchive=historyArchive||[];
+      return historyArchive;
+    }finally{
+      historyArchiveLoading=null;
+    }
+  })();
+  return historyArchiveLoading;
+}
+async function migrateOverflowHistoryIfNeeded(){
+  if(!isHost||!roomRef)return;
+  await loadHistoryArchive();
+  const full=historyForStats();
+  if(full.length<=ROOM_HISTORY_KEEP){
+    state.history=recentRoomHistory(full);
+    return;
+  }
+  const overflow=full.slice(0, full.length-ROOM_HISTORY_KEEP);
+  for(const entry of overflow){
+    if(!entry.matchId)continue;
+    try{
+      await setDoc(matchHistoryDocRef(entry.matchId),{
+        ...entry,
+        teamA1:entry.teams?.[0]?.[0]||'',
+        teamA2:entry.teams?.[0]?.[1]||'',
+        teamB1:entry.teams?.[1]?.[0]||'',
+        teamB2:entry.teams?.[1]?.[1]||'',
+        scoreA:entry.scores?.[0]??0,
+        scoreB:entry.scores?.[1]??0,
+        roomId,
+        appVersion:BCM_VERSION,
+        archivedAt:new Date().toISOString(),
+        savedAt:serverTimestamp()
+      },{merge:true});
+    }catch(e){console.warn('archive migrate failed',entry.matchId,e)}
+  }
+  historyArchive=full.slice();
+  historyArchiveLoaded=true;
+  state.history=recentRoomHistory(full);
+  await setDoc(roomRef,{history:encodeHistoryRows(state.history, ROOM_HISTORY_KEEP),updatedAt:serverTimestamp()},{merge:true});
+}
 async function persistFinishedMatchRecord(entry,{syncRoom=true}={}){
   if(!isHost||!roomRef||!entry?.matchId)return;
   try{
+    const normalized=normalizeHistoryEntry(entry);
     await setDoc(matchHistoryDocRef(entry.matchId),{
-      ...entry,
+      ...normalized,
+      teamA1:normalized.teams?.[0]?.[0]||'',
+      teamA2:normalized.teams?.[0]?.[1]||'',
+      teamB1:normalized.teams?.[1]?.[0]||'',
+      teamB2:normalized.teams?.[1]?.[1]||'',
+      scoreA:normalized.scores?.[0]??0,
+      scoreB:normalized.scores?.[1]??0,
       roomId,
       appVersion:BCM_VERSION,
       savedAt:serverTimestamp()
     },{merge:true});
+    if(normalized){
+      const rest=historyArchive.filter(h=>h.matchId!==normalized.matchId);
+      historyArchive=[...rest,normalized].sort((a,b)=>historySortKey(a)-historySortKey(b));
+      historyArchiveLoaded=true;
+    }
+    trimRoomHistoryLocal();
     if(syncRoom){
-      // 只補 history，避免下一場已開打後又把舊 match 寫回去。
-      const enc=encodeState(state);
-      await setDoc(roomRef,{history:enc.history,updatedAt:serverTimestamp()},{merge:true});
+      await setDoc(roomRef,{history:encodeHistoryRows(state.history, ROOM_HISTORY_KEEP),updatedAt:serverTimestamp()},{merge:true});
       setSync('戰績已同步','online');
     }
     writePendingHistory(readPendingHistory().filter(x=>x.matchId!==entry.matchId));
@@ -353,7 +484,7 @@ function bindSyncModeUI(){
   if(full)full.onchange=()=>{if(full.checked){setSyncMode('full');if(isHost)saveSoon({mode:'full'})}};
   updateSyncModeUI();
 }
-function page(n){all('.page').forEach(x=>x.classList.add('hidden'));$('page'+n).classList.remove('hidden');all('.tab').forEach(x=>x.classList.toggle('active',+x.dataset.page===n));if(n===0)renderDashboard();if(n===4)renderStats();if(n===5)renderHistory();if(n===6){markPollSeen();renderPoll()}if(n===7)loadBackups()}
+function page(n){all('.page').forEach(x=>x.classList.add('hidden'));$('page'+n).classList.remove('hidden');all('.tab').forEach(x=>x.classList.toggle('active',+x.dataset.page===n));if(n===0)renderDashboard();if(n===4)renderStats();if(n===5){loadHistoryArchive().finally(renderHistory)};if(n===6){markPollSeen();renderPoll()}if(n===7)loadBackups()}
 function renderRoster(){const box=$('roster'),q=($('playerSearch')?.value||'').trim().toLowerCase(),sort=$('playerSort')?.value||'favorite';let rows=state.roster.filter(p=>[p.name,p.racket,p.backupRacket,p.note].some(v=>String(v||'').toLowerCase().includes(q)));rows.sort((a,b)=>sort==='name'?a.name.localeCompare(b.name):sort==='games'?playerStats(b.id).games-playerStats(a.id).games:(Number(b.favorite)-Number(a.favorite)||a.name.localeCompare(b.name)));box.innerHTML=rows.map(p=>{const st=playerStats(p.id),td=scopedStats(p.id,'today'),status=playerStatus(p.id),main=[p.racket,p.racketTension,p.racketString].filter(Boolean).join(' · '),backup=[p.backupRacket,p.backupTension,p.backupString].filter(Boolean).join(' · '),expanded=expandedPlayerNotes.has(p.id);return `<button class="person card2 ${p.favorite?'favorite':''} ${status.kind||''}" data-edit="${p.id}"><span class="favorite-star" data-fav="${p.id}" title="收藏">${p.favorite?'⭐':'☆'}</span>${avatar(p.id)}<span class="person-info"><span class="name">${esc(p.name)}</span><span class="person-meta"><span class="mini-tag stats">${td.wins}勝／${td.games}場</span><span class="status-mini">${esc(status.label)}</span></span><span class="racket-lines">${main?`<span class="racket-line" title="主拍 ${esc(main)}">🏸 主拍 ${esc(main)}</span>`:''}${backup?`<span class="racket-line" title="備拍 ${esc(backup)}">🏸 備拍 ${esc(backup)}</span>`:''}${!main&&!backup?`<span class="racket-line">🏸 尚未登錄球拍</span>`:''}</span>${p.note?`<span class="person-note ${expanded?'expanded':''}" data-note-toggle="${p.id}" role="button" aria-expanded="${expanded}"><span class="person-note-text">📝 ${esc(p.note)}</span><span class="person-note-toggle">${expanded?'▲ 收合':'▼ 展開'}</span></span>`:''}</span></button>`}).join('')||'<p class="sub">找不到符合條件的球員。</p>';all('[data-edit]').forEach(b=>b.onclick=e=>{if(e.target.closest('[data-fav],[data-note-toggle]'))return;openEdit(b.dataset.edit)});all('[data-fav]').forEach(b=>b.onclick=async e=>{e.stopPropagation();const p=player(b.dataset.fav);if(!p)return;const before=!!p.favorite;p.favorite=!before;renderRoster();try{if(isHost)saveSoon();else await saveSelfPlayer({id:p.id,favorite:p.favorite})}catch(err){p.favorite=before;renderRoster();alert('收藏更新失敗：'+formatError(err))}});all('[data-note-toggle]').forEach(n=>n.onclick=e=>{e.preventDefault();e.stopPropagation();const id=n.dataset.noteToggle;if(expandedPlayerNotes.has(id))expandedPlayerNotes.delete(id);else expandedPlayerNotes.add(id);renderRoster()})}
 function uniqueIds(ids){return [...new Set((ids||[]).filter(Boolean))]}
 function currentCourtIds(){const live=state.match?.active?state.match.players?.flat?.()||[]:state.court||[];return uniqueIds(live)}
@@ -381,9 +512,40 @@ function gamePoint(){const m=state.match;if(m.winner!==null)return false;for(let
 function currentResultKey(){const m=state.match;if(m.winner===null)return'';return m.matchId||[m.winner,(m.scores||[]).join('-'),...(m.players||[]).flat()].join('|')}
 function renderScore(){const m=state.match;$('scoreA').textContent=m.scores[0];$('scoreB').textContent=m.scores[1];const renderTeam=(t,box)=>{const ids=m.players[t]||[];const serverSide=m.scores[t]%2===0?1:0;const serverIndex=m.positions[t]?.[serverSide]??0;box.innerHTML=ids.map((id,i)=>`<div class="court-name ${m.serving===t&&serverIndex===i&&m.winner===null?'server':''}"><span class="score-player">${avatar(id,'tiny')}<span>${esc(pname(id))}${m.serving===t&&serverIndex===i&&m.winner===null?' · 發球':''}</span></span></div>`).join('')};renderTeam(0,$('namesA'));renderTeam(1,$('namesB'));$('matchPoint').classList.toggle('hidden',!gamePoint());const side=m.scores[m.serving]%2===0?'右':'左';const sid=m.players[m.serving]?.[m.positions[m.serving]?.[m.scores[m.serving]%2===0?1:0]??0];$('serveText').textContent=m.winner!==null?'比賽結束':`${m.serving===0?'A隊':'B隊'} · ${pname(sid)} · ${side}發球區`;// 觀看者固定留在總覽／一般頁面；只有管理員進入全螢幕比分模式
 $('scoreView').classList.toggle('hidden',!m.active||!isHost);const resultKey=currentResultKey();if(!isHost){$('resultModal').classList.add('hidden')}else if(m.active&&m.winner!==null&&resultKey&&resultKey!==dismissedResultKey){$('resultModal').classList.remove('hidden')}else if(m.winner===null){$('resultModal').classList.add('hidden')}}
-function renderHistory(){const list=state.history.map((h,index)=>({h,index})).reverse();$('history').innerHTML=list.map(({h,index})=>`<div class="history-item"><div class="history-main"><strong>${esc((h.teams?.[0]||[]).map(pname).join('／'))} ${h.scores?.[0]??0}：${h.scores?.[1]??0} ${esc((h.teams?.[1]||[]).map(pname).join('／'))}</strong><div class="sub">${esc(h.time||'')}</div></div><div class="history-actions host-only"><button class="btn danger-outline" data-delete-history="${index}">刪除</button></div></div>`).join('')||'<p class="sub">尚無比賽紀錄。</p>';all('[data-delete-history]').forEach(btn=>btn.onclick=()=>deleteHistoryRecord(+btn.dataset.deleteHistory));applyRole()}
-function deleteHistoryRecord(index){if(!isHost)return;const h=state.history[index];if(!h)return;const title=`${(h.teams?.[0]||[]).map(pname).join('／')} ${h.scores?.[0]??0}：${h.scores?.[1]??0} ${(h.teams?.[1]||[]).map(pname).join('／')}`;if(!confirm(`確定刪除這筆比賽紀錄？\n\n${title}\n${h.time||''}`))return;state.history.splice(index,1);renderAll();saveSoon()}
-function clearAllHistory(){if(!isHost)return;if(!state.history.length)return alert('目前沒有比賽紀錄。');if(!confirm(`即將刪除全部 ${state.history.length} 筆比賽紀錄。\n球員名單與目前比分不會被刪除。`))return;const text=prompt('為避免誤刪，請輸入「清空」：','');if(text!=='清空')return alert('輸入不正確，已取消清空。');state.history=[];renderAll();saveSoon();alert('全部比賽紀錄已清空。')}
+function renderHistory(){
+  const list=historyForStats().slice().reverse();
+  const note=`<p class="sub">總戰績會合併雲端完整紀錄計算。房間同步只保留最近 ${ROOM_HISTORY_KEEP} 場以維持速度。</p>`;
+  $('history').innerHTML=note+(list.map(h=>`<div class="history-item"><div class="history-main"><strong>${esc((h.teams?.[0]||[]).map(pname).join('／'))} ${h.scores?.[0]??0}：${h.scores?.[1]??0} ${esc((h.teams?.[1]||[]).map(pname).join('／'))}</strong><div class="sub">${esc(h.time||h.endedAt||'')}</div></div><div class="history-actions host-only"><button class="btn danger-outline" data-delete-history-id="${esc(h.matchId||'')}">刪除</button></div></div>`).join('')||'<p class="sub">尚無比賽紀錄。</p>');
+  all('[data-delete-history-id]').forEach(btn=>btn.onclick=()=>deleteHistoryRecordById(btn.dataset.deleteHistoryId));
+  applyRole();
+}
+async function deleteHistoryRecordById(matchId){
+  if(!isHost||!matchId)return;
+  const h=historyForStats().find(x=>x.matchId===matchId);if(!h)return;
+  const title=`${(h.teams?.[0]||[]).map(pname).join('／')} ${h.scores?.[0]??0}：${h.scores?.[1]??0} ${(h.teams?.[1]||[]).map(pname).join('／')}`;
+  if(!confirm(`確定刪除這筆比賽紀錄？
+
+${title}
+${h.time||''}`))return;
+  state.history=(state.history||[]).filter(x=>x.matchId!==matchId);
+  historyArchive=historyArchive.filter(x=>x.matchId!==matchId);
+  try{await deleteDoc(matchHistoryDocRef(matchId))}catch(e){console.warn('delete matchHistory failed',e)}
+  trimRoomHistoryLocal();renderAll();saveSoon({mode:'full'});
+}
+async function clearAllHistory(){
+  if(!isHost)return;
+  const total=historyForStats().length;
+  if(!total)return alert('目前沒有比賽紀錄。');
+  if(!confirm(`即將刪除全部 ${total} 筆比賽紀錄（含雲端封存）。
+球員名單與目前比分不會被刪除。`))return;
+  const text=prompt('為避免誤刪，請輸入「清空」：','');
+  if(text!=='清空')return alert('輸入不正確，已取消清空。');
+  try{
+    const snaps=await getDocs(matchHistoryCollectionRef());
+    await Promise.all(snaps.docs.map(d=>deleteDoc(d.ref)));
+  }catch(e){console.warn('clear matchHistory failed',e)}
+  historyArchive=[];historyArchiveLoaded=true;state.history=[];renderAll();saveSoon({mode:'full'});alert('全部比賽紀錄已清空。');
+}
 function renderAll(){renderRoster();renderAttendance();renderCourt();renderHistory();renderScore();renderDashboard();renderStats();renderPoll();applyRole()}
 function startMatch(){dismissedResultKey='';const ids=state.court.filter(Boolean);if(ids.length!==4||new Set(ids).size!==4)return alert('請選擇四位不同球員。');reconcileWaitingQueue(ids);state.queueDraftChosen=[];state.match={active:true,players:[[ids[0],ids[1]],[ids[2],ids[3]]],scores:[0,0],rallies:[],serving:0,positions:[[0,1],[0,1]],winner:null};saveSoon();renderScore()}
 function finishMatch(){
@@ -391,7 +553,12 @@ function finishMatch(){
   let newlyRecorded=false;
   if(!state.history.some(h=>h.matchId===m.matchId)){
     newlyRecorded=true;m.matchId=m.matchId||randomToken();const now=new Date();
-    state.history.push({matchId:m.matchId,time:now.toLocaleString('zh-TW'),endedAt:now.toISOString(),dateKey:localDateKey(now),monthKey:localMonthKey(now),teams:structuredClone(m.players),scores:[...m.scores],winner:m.winner});
+    const entry={matchId:m.matchId,time:now.toLocaleString('zh-TW'),endedAt:now.toISOString(),dateKey:localDateKey(now),monthKey:localMonthKey(now),teams:structuredClone(m.players),scores:[...m.scores],winner:m.winner};
+    state.history.push(entry);
+    const rest=historyArchive.filter(h=>h.matchId!==entry.matchId);
+    historyArchive=[...rest,normalizeHistoryEntry(entry)].filter(Boolean).sort((a,b)=>historySortKey(a)-historySortKey(b));
+    historyArchiveLoaded=true;
+    trimRoomHistoryLocal();
   }
   const winners=[...m.players[m.winner]],losers=[...m.players[1-m.winner]],previousCourt=m.players.flat();
   reconcileWaitingQueue(previousCourt);
@@ -443,14 +610,14 @@ function startNext(){
   if(isHost&&voiceEnabled&&finalCall)setTimeout(()=>speak(finalCall),180)
 }
 
-const BCM_VERSION='2.2.9';
+const BCM_VERSION='2.2.10';
 function backupsRef(){return collection(db,'badmintonRooms',roomId,'backups')}
 function backupDocRef(id){return doc(db,'badmintonRooms',roomId,'backups',id)}
-function backupCounts(data=state){return{players:data.roster?.length||0,history:data.history?.length||0,attendance:data.attendance?.length||0,pollOptions:data.schedulePoll?.options?.length||0}}
+function backupCounts(data=state){const histCount=data===state?historyForStats().length:(data.history?.length||0);return{players:data.roster?.length||0,history:histCount,attendance:data.attendance?.length||0,pollOptions:data.schedulePoll?.options?.length||0}}
 function backupCompleteness(data=state){const checks=[Array.isArray(data.roster),Array.isArray(data.history),Array.isArray(data.attendance),!!data.match,!!data.rules,!!data.schedulePoll];return Math.round(checks.filter(Boolean).length/checks.length*100)}
 function backupId(type,custom=''){if(custom)return custom;const stamp=new Date().toISOString().replace(/[-:TZ.]/g,'').slice(0,14);return `${type}_${stamp}_${randomToken().slice(0,5)}`}
 function backupLabel(type){return({genesis:'Genesis Backup',manual:'手動備份',auto:'賽後自動備份',daily:'每日備份',emergency:'還原前保護備份'})[type]||'備份'}
-function makeBackupRecord(type='manual',id=''){const clean=encodeState(state),now=new Date();return{schemaVersion:1,appVersion:BCM_VERSION,roomId,type,label:backupLabel(type),createdAt:now.toISOString(),createdAtMs:now.getTime(),createdBy:type==='auto'||type==='daily'?'系統':'管理員',counts:backupCounts(state),completeness:backupCompleteness(state),data:clean}}
+function makeBackupRecord(type='manual',id=''){const clean=encodeState(state);clean.history=encodeHistoryRows(historyForStats(),0);const now=new Date();return{schemaVersion:1,appVersion:BCM_VERSION,roomId,type,label:backupLabel(type),createdAt:now.toISOString(),createdAtMs:now.getTime(),createdBy:type==='auto'||type==='daily'?'系統':'管理員',counts:backupCounts(state),completeness:backupCompleteness(state),data:clean}}
 async function createCloudBackup(type='manual',opts={}){if(!roomId||!roomRef)throw new Error('尚未進入球局');if(!isHost&&!opts.system)throw new Error('只有管理員可以建立備份');const id=backupId(type,opts.id||'');const ref=backupDocRef(id);if(opts.id&&['genesis','daily','auto'].includes(type)){const exists=await getDoc(ref);if(exists.exists())return{id,skipped:true}}const record=makeBackupRecord(type,id);await setDoc(ref,record);if(type==='auto'||type==='daily')await pruneAutomaticBackups();if(!opts.silent){alert(`${record.label}已建立`);await loadBackups()}return{id,record}}
 async function ensureGenesisAndDaily(){if(!isHost||!roomId)return;try{await createCloudBackup('genesis',{id:'genesis',silent:true,system:true});const day=localDateKey();await createCloudBackup('daily',{id:`daily_${day}`,silent:true,system:true});await loadBackups()}catch(e){console.warn('自動備份未建立',e);setError('雲端備份尚未啟用：'+formatError(e))}}
 async function pruneAutomaticBackups(){const snaps=await getDocs(query(backupsRef(),orderBy('createdAtMs','desc'),limit(60)));const autos=snaps.docs.filter(d=>['auto','daily'].includes(d.data().type));for(const d of autos.slice(10))await deleteDoc(d.ref)}
@@ -461,7 +628,7 @@ async function loadBackups(){const box=$('backupList'),health=$('backupHealth');
 function renderBackupCenter(){updateSyncModeUI();const rows=backupRows,genesis=rows.find(x=>x.id==='genesis'),last=rows[0],autoCount=rows.filter(x=>['auto','daily'].includes(x.type)).length,manualCount=rows.filter(x=>x.type==='manual').length;$('backupHealth').innerHTML=`<div class="health-box"><span class="sub">最後備份</span><strong>${last?esc(formatBackupTime(last.createdAt)):'尚未建立'}</strong></div><div class="health-box"><span class="sub">Genesis</span><strong>${genesis?'存在 ✅':'尚未建立'}</strong></div><div class="health-box"><span class="sub">自動／每日</span><strong>${autoCount} 份</strong></div><div class="health-box"><span class="sub">資料完整度</span><strong>${backupCompleteness()}%</strong></div>`;$('backupList').innerHTML=rows.length?rows.map(b=>`<div class="backup-row"><div><div class="backup-title"><span class="backup-type ${esc(b.type)}">${esc(backupTypeName(b.type))}</span>${esc(b.label||b.id)}</div><div class="backup-meta">${esc(formatBackupTime(b.createdAt))} · BCM ${esc(b.appVersion||'—')} · 球員 ${b.counts?.players??0} · 紀錄 ${b.counts?.history??0} · 完整度 ${b.completeness??'—'}%</div></div><div class="backup-row-actions"><button class="btn" data-backup-export="${esc(b.id)}">匯出</button>${isHost?`<button class="btn blue" data-backup-restore="${esc(b.id)}">還原</button>${b.id!=='genesis'?`<button class="btn danger-outline" data-backup-delete="${esc(b.id)}">刪除</button>`:''}`:''}</div></div>`).join(''):'<div class="poll-empty">尚無雲端備份。管理員可建立第一份備份。</div>';all('[data-backup-export]').forEach(b=>b.onclick=()=>exportCloudBackup(b.dataset.backupExport));all('[data-backup-restore]').forEach(b=>b.onclick=()=>restoreCloudBackup(b.dataset.backupRestore));all('[data-backup-delete]').forEach(b=>b.onclick=()=>deleteCloudBackup(b.dataset.backupDelete))}
 async function exportCloudBackup(id){try{const snap=await getDoc(backupDocRef(id));if(!snap.exists())throw new Error('找不到備份');downloadJson(snap.data(),`BCM_Cloud_${roomId}_${id}.json`)}catch(e){alert(formatError(e))}}
 function downloadJson(obj,name){const blob=new Blob([JSON.stringify(obj,null,2)],{type:'application/json'}),a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download=name;a.click();setTimeout(()=>URL.revokeObjectURL(a.href),1000)}
-async function restoreCloudBackup(id){if(!isHost)return alert('只有管理員可以還原。');const row=backupRows.find(x=>x.id===id);if(!row)return alert('找不到備份。');if(!confirm(`確定還原「${row.label||id}」？\n\n球員 ${row.counts?.players??0} 人\n紀錄 ${row.counts?.history??0} 場\n時間 ${formatBackupTime(row.createdAt)}\n\n系統會先建立目前資料的保護備份。`))return;const typed=prompt('為避免誤操作，請輸入「還原」：','');if(typed!=='還原')return alert('已取消還原。');try{setSync('建立保護備份');await createCloudBackup('emergency',{silent:true});const snap=await getDoc(backupDocRef(id));if(!snap.exists())throw new Error('備份不存在');const b=snap.data();if(!b.data)throw new Error('備份資料不完整');await setDoc(roomRef,{...b.data,updatedAt:serverTimestamp()},{merge:true});state=cleanState(b.data);renderAll();setSync('還原完成','online');alert('還原成功，所有裝置會即時同步。');await loadBackups()}catch(e){setSync('還原失敗','error');alert(formatError(e))}}
+async function restoreCloudBackup(id){if(!isHost)return alert('只有管理員可以還原。');const row=backupRows.find(x=>x.id===id);if(!row)return alert('找不到備份。');if(!confirm(`確定還原「${row.label||id}」？\n\n球員 ${row.counts?.players??0} 人\n紀錄 ${row.counts?.history??0} 場\n時間 ${formatBackupTime(row.createdAt)}\n\n系統會先建立目前資料的保護備份。`))return;const typed=prompt('為避免誤操作，請輸入「還原」：','');if(typed!=='還原')return alert('已取消還原。');try{setSync('建立保護備份');await createCloudBackup('emergency',{silent:true});const snap=await getDoc(backupDocRef(id));if(!snap.exists())throw new Error('備份不存在');const b=snap.data();if(!b.data)throw new Error('備份資料不完整');await setDoc(roomRef,{...b.data,updatedAt:serverTimestamp()},{merge:true});state=cleanState(b.data);historyArchive=(state.history||[]).map(normalizeHistoryEntry).filter(Boolean);historyArchiveLoaded=true;await migrateOverflowHistoryIfNeeded();renderAll();setSync('還原完成','online');alert('還原成功，所有裝置會即時同步。');await loadBackups()}catch(e){setSync('還原失敗','error');alert(formatError(e))}}
 async function deleteCloudBackup(id){if(id==='genesis')return alert('Genesis Backup 不可刪除。');if(!confirm('確定刪除這份雲端備份？'))return;try{await deleteDoc(backupDocRef(id));await loadBackups()}catch(e){alert(formatError(e))}}
 
 let pendingAvatar=null;function refreshProfilePreview(){const p=player(editId),src=pendingAvatar!==null?pendingAvatar:(p?.avatar||'');$('editAvatarPreview').innerHTML=src?`<img src="${src}" alt="">`:esc(initials(p?.name));$('profileTitle').textContent=p?.name||'球員資料';const st=playerStats(editId),td=scopedStats(editId,'today'),mo=scopedStats(editId,'month'),status=playerStatus(editId),rel=relationshipStats(editId);$('statGames').textContent=st.games;$('statWins').textContent=st.wins;$('statRate').textContent=st.rate+'%';$('ringRate').textContent=st.rate+'%';$('profileWinRing').style.setProperty('--rate',st.rate);$('profileSummary').textContent=p?.racket?`🏸 ${p.racket}`:'🏸 尚未填寫球拍資料';$('profileMainRacket').textContent=[p?.racket,p?.racketTension,p?.racketString].filter(Boolean).join(' · ')||'尚未填寫';$('profileBackupRacket').textContent=[p?.backupRacket,p?.backupTension,p?.backupString].filter(Boolean).join(' · ')||'尚未填寫';$('profileStatus').textContent=status.label;const streak=td.streak?(td.kind==='W'?`🔥 ${td.streak}連勝`:`🧊 ${td.streak}連敗`):'—';$('profileToday').textContent=`${td.wins}勝 ${td.losses}敗`;$('profileMonth').textContent=`${mo.wins}勝 ${mo.losses}敗`;$('profileStreak').textContent=streak;$('profileBadges').innerHTML=careerBadges(editId).map(([icon,label,on])=>`<span class="career-badge ${on?'':'locked'}">${icon} ${label}</span>`).join('');$('profilePartnerRanking').innerHTML=relationRows(rel.partners,'尚無搭檔紀錄');$('profileOpponent').innerHTML=relationRows(rel.opponents,'尚無對戰紀錄');$('profileRecent').innerHTML='<h3>最近比賽</h3>'+((td.list.slice().reverse().slice(0,5).map(x=>`<div class="recent-game">${x.won?'✅ 勝':'❌ 敗'} · ${esc(x.h.scores[0]+'：'+x.h.scores[1])} · ${esc(x.h.time||'')}</div>`).join(''))||'<div class="sub">今日尚無比賽。</div>')}
@@ -484,6 +651,6 @@ document.addEventListener('click',e=>{if(!roomMoreMenu.classList.contains('hidde
 document.addEventListener('keydown',e=>{if(e.key==='Escape')setRoomMoreOpen(false)});
 
 const tomorrow=new Date();tomorrow.setDate(tomorrow.getDate()+7);$('pollDate').value=localDateKey(tomorrow);updateVoiceButton();$('backupExportBtn').onclick=exportBackup;$('backupImportBtn').onclick=()=>$('backupImportFile').click();$('backupImportFile').onchange=e=>{if(e.target.files?.[0])importBackup(e.target.files[0]);e.target.value=''};$('createCloudBackup').onclick=()=>createCloudBackup('manual').catch(e=>alert(formatError(e)));$('refreshBackups').onclick=loadBackups;renderRoomLibrary();$('autoReturnRoom').checked=localStorage.getItem(ROOM_AUTO_KEY)==='1';const q=new URLSearchParams(location.search),rid=(q.get('room')||'').toUpperCase().replace(/[^A-Z0-9]/g,'').slice(0,6);const skipAutoOnce=sessionStorage.getItem(ROOM_SKIP_AUTO_ONCE)==='1';if(skipAutoOnce)sessionStorage.removeItem(ROOM_SKIP_AUTO_ONCE);if(rid)connectRoom(rid);else if(!skipAutoOnce&&localStorage.getItem(ROOM_AUTO_KEY)==='1'){const lastId=localStorage.getItem('bcmLastRoomV1'),r=roomRecord(lastId);if(r)setTimeout(()=>openSavedRoom(r.id),180)}
-function exportBackup(){const data={schemaVersion:1,appVersion:BCM_VERSION,createdAt:new Date().toISOString(),roomId,counts:backupCounts(),data:encodeState(state)};downloadJson(data,`BCM_Backup_${roomId||'LOCAL'}_${new Date().toISOString().slice(0,19).replace(/[:T]/g,'-')}.json`)}
+function exportBackup(){const data={schemaVersion:1,appVersion:BCM_VERSION,createdAt:new Date().toISOString(),roomId,counts:backupCounts(),data:{...encodeState(state),history:encodeHistoryRows(historyForStats(),0)}};downloadJson(data,`BCM_Backup_${roomId||'LOCAL'}_${new Date().toISOString().slice(0,19).replace(/[:T]/g,'-')}.json`)}
 function importBackup(file){const fr=new FileReader();fr.onload=async()=>{try{const b=JSON.parse(fr.result),data=b.data||b;if(!data||!Array.isArray(data.roster)||!Array.isArray(data.history))throw new Error('備份檔缺少球員或歷史資料');if(!roomRef||!isHost)throw new Error('請先以管理員身分進入球局');if(!confirm(`準備還原本機備份：\n球員 ${data.roster.length} 人\n紀錄 ${data.history.length} 場\n\n還原前會先建立 Emergency Backup。`))return;const typed=prompt('請輸入「還原」：','');if(typed!=='還原')return;await createCloudBackup('emergency',{silent:true});await setDoc(roomRef,{...encodeState(decodeState(data)),updatedAt:serverTimestamp()},{merge:true});state=cleanState(data);renderAll();alert('本機備份還原成功。');await loadBackups()}catch(e){alert('無法還原：'+(e.message||e))}};fr.readAsText(file)}
 if('serviceWorker'in navigator&&location.protocol.startsWith('http'))navigator.serviceWorker.register('./sw.js').catch(()=>{});

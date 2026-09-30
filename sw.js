@@ -1,4 +1,4 @@
-const CACHE='7b-bcm-2-2-9-lite-score-sync';
+const CACHE='7b-bcm-2-2-10-history-archive';
 const ASSETS=['./','./index.html','./manifest.webmanifest','./src/main.js','./icons/icon-180.png','./icons/icon-192.png','./icons/icon-512.png','./icons/icon-maskable-512.png','./assets/7b-logo-full.png','./7b-logo-full.png'];
 self.addEventListener('install',e=>e.waitUntil(caches.open(CACHE).then(c=>c.addAll(ASSETS)).then(()=>self.skipWaiting())));
 self.addEventListener('activate',e=>e.waitUntil(caches.keys().then(keys=>Promise.all(keys.filter(k=>k!==CACHE).map(k=>caches.delete(k)))).then(()=>self.clients.claim())));
