@@ -12,13 +12,14 @@
 - 還原前自動建立 Emergency Backup
 - Genesis 不可刪除
 
-部署：
-1. 將本資料夾完整拖到 Netlify Deploys。
+部署（建議改用 Cloudflare Pages，避免 Netlify 流量／點數用完暫停）：
+1. npm run build，再把 dist 上傳到 Cloudflare Pages；或接 GitHub 自動建置（Build: npm run build，Output: dist）。
 2. Firebase Console → Firestore Database → 規則。
 3. 將 FIRESTORE_RULES.txt 全部貼上並按「發布」。
 4. 用管理員模式進入房間，開啟「備份」分頁確認 Genesis 已建立。
+5. 舊 Netlify 站可刪除；Firebase 資料不受影響。
 
-注意：只部署網站不會清除現有 Firestore 球員或歷史資料。
+注意：只部署／搬家網站不會清除現有 Firestore 球員或歷史資料。
 
 BCM 2.2.5 更新：
 - 「約球投票」改名為「下次球局」
